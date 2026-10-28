@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Planora AI">
+  <rect width="64" height="64" rx="16" fill="#2d2442"/>
+  <circle cx="32" cy="32" r="17" fill="none" stroke="#e7b29a" stroke-width="4"/>
+  <path d="M32 18l5 11 11 3-9 7 3 12-10-7-10 7 3-12-9-7 11-3z" fill="#ede2ff"/>
+</svg>
