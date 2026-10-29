@@ -30,7 +30,7 @@ export const getThinkingLevel = () => {
   return level && THINKING_LEVELS.has(level) ? level : DEFAULT_THINKING_LEVEL;
 };
 
-export const DEFAULT_TIMEOUT_MS = 240_000;
+export const DEFAULT_TIMEOUT_MS = 45_000;
 const MAX_PROVIDER_ATTEMPTS = 3;
 const PROVIDER_RETRY_BASE_DELAY_MS = 200;
 const PROVIDER_RETRY_MAX_DELAY_MS = 600;
@@ -778,6 +778,11 @@ const getRetryAfterMs = (headers, now = Date.now()) => {
 
 const isRetryableProviderError = (error) => {
   const classification = classifyGeminiError(error);
+  console.error('[Gemini Provider Error]', {
+  message: String(error?.message ?? 'Unknown error').slice(0, 500),
+  statusCode: classification.providerStatusCode,
+  code: error?.code,
+});
   return classification.retryable
     && (
       (classification.providerStatusCode !== null && classification.providerStatusCode >= 500)
