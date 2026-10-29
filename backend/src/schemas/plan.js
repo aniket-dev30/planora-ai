@@ -23,7 +23,7 @@ export const eventInputSchema = z.object({
   priorities: z.array(z.string().trim().max(60)).max(8).default([]),
   requestedAction: z.string().trim().max(500).default(''),
   existingPlan: z.unknown().optional(),
-}).transform((input) => ({
+}).strict().transform((input) => ({
   ...input,
   guestCount: Number(input.guestCount),
   totalBudget: Number(input.totalBudget),

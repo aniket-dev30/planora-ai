@@ -1,11 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { generatePlan } from './api';
 import type { ApiPlanResponse, EventFormValues } from '../types/api';
+import { useDemoAccessToken } from '../auth/accessToken';
 
 export type GenerationOutcome =
   | { status: 'done'; result: ApiPlanResponse }
   | { status: 'cancelled' }
   | { status: 'error'; message: string };
+
+const getTokenForRequest = async (getToken: () => Promise<string>, signal: AbortSignal) => {
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(new DOMException('Plan generation was cancelled.', 'AbortError'));
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([getToken(), aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+};
 
 /**
  * Owns one cancellable plan generation: a single in-flight request, an AbortController that is always
@@ -16,6 +31,7 @@ export function useGeneration() {
   const [progress, setProgress] = useState('');
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const inFlight = useRef(false);
+  const getAccessToken = useDemoAccessToken();
   const controllerRef = useRef<AbortController | null>(null);
   const mounted = useRef(true);
 
@@ -38,9 +54,10 @@ export function useGeneration() {
     setStartedAt(Date.now());
     setProgress('Sending your request…');
     try {
+      const accessToken = getAccessToken ? await getTokenForRequest(getAccessToken, controller.signal) : undefined;
       const result = await generatePlan(request, (message) => {
         if (mounted.current) setProgress(message);
-      }, controller.signal);
+      }, controller.signal, accessToken);
       return { status: 'done', result };
     } catch (error) {
       if (controller.signal.aborted) return { status: 'cancelled' };
@@ -54,7 +71,7 @@ export function useGeneration() {
         setStartedAt(null);
       }
     }
-  }, []);
+  }, [getAccessToken]);
 
   const cancel = useCallback(() => {
     controllerRef.current?.abort();

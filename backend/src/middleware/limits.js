@@ -1,3 +1,6 @@
+import { parseGenerationInput, PlanGenerationError } from '../services/planService.js';
+import { ZodError } from 'zod';
+
 const toPositiveInt = (value, fallback) => {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
@@ -81,7 +84,42 @@ export const createConcurrencyLimiter = ({ max = 2 } = {}) => {
   return middleware;
 };
 
+export const createDailyGenerationLimiter = ({ max = 50, now = () => Date.now() } = {}) => {
+  let activeDate = new Date(now()).toISOString().slice(0, 10);
+  let generationCount = 0;
+
+  return (req, res, next) => {
+    try {
+      parseGenerationInput(req.body);
+    } catch (error) {
+      if (error instanceof ZodError || (error instanceof PlanGenerationError && error.statusCode < 500)) {
+        return next();
+      }
+      return next(error);
+    }
+
+    const current = now();
+    const currentDate = new Date(current).toISOString().slice(0, 10);
+    if (currentDate !== activeDate) {
+      activeDate = currentDate;
+      generationCount = 0;
+    }
+    if (generationCount >= max) {
+      const nextDay = Date.parse(`${activeDate}T00:00:00.000Z`) + 86_400_000;
+      return rejectTooMany(
+        res,
+        'DAILY_GENERATION_LIMIT',
+        'The daily Planora demo generation limit has been reached. Please try again tomorrow.',
+        Math.max(1, Math.ceil((nextDay - current) / 1000)),
+      );
+    }
+    generationCount += 1;
+    return next();
+  };
+};
+
 export const readLimitConfig = (env = process.env) => ({
   rateMax: toPositiveInt(env.PLAN_RATE_LIMIT_PER_MINUTE, 10),
   concurrencyMax: toPositiveInt(env.PLAN_MAX_CONCURRENT_PER_IP, 2),
+  dailyGenerationMax: toPositiveInt(env.PLAN_MAX_GENERATIONS_PER_DAY, 50),
 });

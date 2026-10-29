@@ -2,7 +2,12 @@ import test, { after, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { createApp } from '../src/app.js';
-import { createConcurrencyLimiter, createRateLimiter } from '../src/middleware/limits.js';
+import { createAccessControl } from '../src/middleware/accessControl.js';
+import {
+  createConcurrencyLimiter,
+  createDailyGenerationLimiter,
+  createRateLimiter,
+} from '../src/middleware/limits.js';
 import { parseAllowedOrigins } from '../src/middleware/security.js';
 
 const futureDate = (days) => {
@@ -42,7 +47,7 @@ const savedKey = process.env.GEMINI_API_KEY;
 before(async () => {
   // No key: the app runs in its labelled Demo mode, so no external API can be called from these tests.
   delete process.env.GEMINI_API_KEY;
-  const app = createApp({ env: { FRONTEND_URL: 'http://localhost:5173, https://planora.example', PLAN_RATE_LIMIT_PER_MINUTE: '4' } });
+  const app = createApp({ env: { NODE_ENV: 'test', FRONTEND_URL: 'http://localhost:5173, https://planora.example', PLAN_RATE_LIMIT_PER_MINUTE: '4' } });
   await new Promise((resolve) => { server = app.listen(0, '127.0.0.1', resolve); });
   base = `http://127.0.0.1:${server.address().port}`;
 });
@@ -176,4 +181,126 @@ test('the concurrency limiter caps in-flight generations and releases them on cl
 test('FRONTEND_URL accepts a comma-separated list and trims trailing slashes', () => {
   assert.deepEqual(parseAllowedOrigins('https://a.example/, http://localhost:5173'), ['https://a.example', 'http://localhost:5173']);
   assert.deepEqual(parseAllowedOrigins(''), ['http://localhost:5173']);
+});
+
+test('production requires explicit OIDC and CORS configuration', () => {
+  assert.throws(() => createAccessControl({ env: {} }), /OIDC issuer, audience, JWKS URL, and allowed subject/);
+  const developmentAuth = createAccessControl({ env: { NODE_ENV: 'development' } });
+  let passedWithoutToken = false;
+  developmentAuth({}, {}, () => { passedWithoutToken = true; });
+  assert.equal(passedWithoutToken, true);
+  assert.throws(() => createAccessControl({
+    env: { NODE_ENV: 'development', OIDC_AUDIENCE: 'https://planora-api' },
+  }), /OIDC issuer, audience, JWKS URL, and allowed subject/);
+  assert.throws(() => createApp({ env: { NODE_ENV: 'production' } }), /FRONTEND_URL/);
+  assert.throws(() => createApp({
+    env: { NODE_ENV: 'production', FRONTEND_URL: 'https://planora.example' },
+  }), /OIDC issuer, audience, JWKS URL, and allowed subject/);
+  assert.throws(() => createApp({
+    env: {
+      FRONTEND_URL: 'https://planora.example',
+      OIDC_ISSUER_URL: 'https://planora-demo.auth0.com/',
+      OIDC_AUDIENCE: 'https://planora-api',
+      OIDC_JWKS_URL: 'http://planora-demo.auth0.com/.well-known/jwks.json',
+      OIDC_ALLOWED_SUBJECT: 'auth0|demo-owner',
+    },
+  }), /must use HTTPS/);
+});
+
+test('daily generation limiter counts only valid requests and resets at UTC midnight', () => {
+  let clock = Date.parse('2026-06-05T23:59:00.000Z');
+  const limiter = createDailyGenerationLimiter({ max: 1, now: () => clock });
+  const attempt = (body) => {
+    const result = { status: 200, code: null, headers: {} };
+    const res = {
+      set(name, value) { result.headers[name] = value; return res; },
+      status(status) { result.status = status; return res; },
+      json(payload) { result.code = payload.code; return res; },
+    };
+    let passed = false;
+    limiter({ body }, res, () => { passed = true; });
+    return { ...result, passed };
+  };
+  assert.equal(attempt({ ...validBody(), unexpected: true }).passed, true);
+  assert.equal(attempt(validBody()).passed, true);
+  const limited = attempt(validBody());
+  assert.equal(limited.status, 429);
+  assert.equal(limited.code, 'DAILY_GENERATION_LIMIT');
+  assert.ok(Number(limited.headers['Retry-After']) > 0);
+  clock += 60_000;
+  assert.equal(attempt(validBody()).passed, true);
+});
+
+test('production plan routes require the authorized OIDC subject and enforce the daily limit', async () => {
+  const protectedApp = createApp({
+    env: {
+      NODE_ENV: 'production',
+      FRONTEND_URL: 'https://demo.planora.example',
+      OIDC_ISSUER_URL: 'https://planora-demo.auth0.com/',
+      OIDC_AUDIENCE: 'https://planora-api',
+      OIDC_JWKS_URL: 'https://planora-demo.auth0.com/.well-known/jwks.json',
+      OIDC_ALLOWED_SUBJECT: 'auth0|demo-owner',
+      PLAN_MAX_GENERATIONS_PER_DAY: '1',
+    },
+    verifyAccessToken: async (token) => {
+      if (token === 'invalid') throw new Error('Invalid token');
+      return { sub: token === 'owner' ? 'auth0|demo-owner' : 'auth0|other-user' };
+    },
+  });
+  const protectedServer = protectedApp.listen(0, '127.0.0.1');
+  await new Promise((resolve) => protectedServer.once('listening', resolve));
+  const protectedBase = `http://127.0.0.1:${protectedServer.address().port}`;
+
+  try {
+    const health = await fetch(`${protectedBase}/api/health`);
+    assert.equal(health.status, 200);
+
+    const unauthenticated = await post(protectedBase, '/api/plans/generate', validBody());
+    assert.equal(unauthenticated.status, 401);
+    assert.equal((await unauthenticated.json()).code, 'AUTHENTICATION_REQUIRED');
+
+    const invalidToken = await post(protectedBase, '/api/plans/generate', validBody(), {
+      Authorization: 'Bearer invalid',
+    });
+    assert.equal(invalidToken.status, 401);
+    assert.equal((await invalidToken.json()).code, 'ACCESS_TOKEN_INVALID');
+
+    const wrongOwner = await post(protectedBase, '/api/plans/generate', validBody(), {
+      Authorization: 'Bearer other',
+    });
+    assert.equal(wrongOwner.status, 403);
+    assert.equal((await wrongOwner.json()).code, 'DEMO_ACCESS_DENIED');
+
+    const malformed = await post(protectedBase, '/api/plans/generate', {
+      ...validBody(),
+      unrelated: 'must not be accepted',
+    }, { Authorization: 'Bearer owner' });
+    assert.equal(malformed.status, 400);
+    assert.equal((await malformed.json()).code, 'INVALID_PLAN_REQUEST');
+
+    const allowed = await post(protectedBase, '/api/plans/generate', validBody(), {
+      Authorization: 'Bearer owner',
+    });
+    assert.equal(allowed.status, 200);
+    assert.equal((await allowed.json()).success, true);
+
+    const overLimit = await post(protectedBase, '/api/plans/generate', validBody(), {
+      Authorization: 'Bearer owner',
+    });
+    assert.equal(overLimit.status, 429);
+    assert.equal((await overLimit.json()).code, 'DAILY_GENERATION_LIMIT');
+
+    const preflight = await fetch(`${protectedBase}/api/plans/generate/stream`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://demo.planora.example',
+        'Access-Control-Request-Method': 'POST',
+        'Access-Control-Request-Headers': 'authorization,content-type',
+      },
+    });
+    assert.equal(preflight.status, 204);
+    assert.match(preflight.headers.get('access-control-allow-headers'), /authorization/i);
+  } finally {
+    await new Promise((resolve) => protectedServer.close(resolve));
+  }
 });

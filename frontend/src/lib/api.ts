@@ -28,6 +28,7 @@ export async function generatePlan(
   request: EventFormValues,
   onProgress?: (message: string) => void,
   signal?: AbortSignal,
+  accessToken?: string,
 ): Promise<ApiPlanResponse> {
   let response: Response;
   const timeoutSignal = AbortSignal.timeout(CLIENT_TIMEOUT_MS);
@@ -37,7 +38,10 @@ export async function generatePlan(
   try {
     response = await fetch(`${API_BASE_URL}/api/plans/generate/stream`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+      },
       // `today` is the user's local calendar date, so deadlines are not judged against the server's UTC date.
       body: JSON.stringify({ ...request, today: getTodayDateKey() }),
       signal: requestSignal,

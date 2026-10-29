@@ -58,6 +58,21 @@ test('generatePlan sends the event context and returns explicit Gemini source', 
   }
 });
 
+test('generatePlan attaches an access token only as an authorization header', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, options) => {
+    assert.equal(options.headers.Authorization, 'Bearer demo-access-token');
+    assert.equal(options.body.includes('demo-access-token'), false);
+    return eventStreamResponse({ type: 'complete', result: createPlanResponse('gemini') });
+  };
+  try {
+    const result = await generatePlan(request, undefined, undefined, 'demo-access-token');
+    assert.equal(result.source, 'gemini');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('generatePlan remains pending through a quiet stream and returns when the complete plan arrives', async () => {
   const originalFetch = globalThis.fetch;
   let streamController;

@@ -8,7 +8,8 @@ Planora AI helps plan weddings, birthdays and community celebrations. Describe a
 - **Event workspace**: Budget, Timeline, Vendors & Tasks and Settings, all editable, with validation (budget totals, non-overlapping timeline, task deadlines before the event date).
 - **AI Planner**: ask for a change in plain language ("Reduce my budget by 15%"). Focused requests regenerate only the related sections, so your other edits and task progress are kept. Suggestions are reviewed before anything is saved.
 - **Honest generation experience**: live elapsed timer, real backend status messages, a working Cancel, duplicate-submit protection, and clear errors with a retry.
-- **Persistence** in the browser (`localStorage`, key `planora-ai-events-v1`); no accounts, no database.
+- **Persistence** in the browser (`localStorage`, key `planora-ai-events-v1`); event data is not sent to Auth0 or stored by the backend.
+- **Controlled demo access**: production plan-generation routes require an Auth0-issued OIDC access token for the configured owner account.
 - Accessible, responsive UI (keyboard-operable dialogs and menus, visible focus, reduced-motion support).
 
 ## Tech stack
@@ -31,6 +32,8 @@ Browser (React) ──POST /api/plans/generate/stream (SSE)──▶ Express ─
 ```
 
 - The Gemini key never leaves the backend.
+- The frontend obtains OIDC access tokens through Auth0's browser SDK and keeps its token cache in memory; the backend verifies RS256 signature, issuer, audience and the single allowed subject on both generation routes.
+- Local development bypasses OIDC only when no OIDC settings are present and `NODE_ENV=development` (or `test`). All other environments fail closed if access-control or CORS configuration is missing.
 - Streaming plan text is assembled from SDK text-delta events; only completed interactions with non-empty output proceed to JSON parsing. Empty or incomplete provider responses return a controlled error.
 - Gemini receives a schema limited to supported structured-output keywords; the server still applies the full Zod response validation before returning a plan.
 - Gemini provider requests use one SDK attempt and at most three serial application attempts. Transient retries use jittered backoff, honor upstream `Retry-After` hints when they fit within the 30-second retry window, and remain within the configured request timeout.
@@ -96,12 +99,23 @@ Vite proxies `/api` to `http://localhost:5000` (override with `VITE_DEV_API_TARG
 | `TRUST_PROXY` | – | Set (e.g. `1`) behind a reverse proxy so per-IP limits see client IPs |
 | `PLAN_RATE_LIMIT_PER_MINUTE` | `10` | Plan requests per IP per minute |
 | `PLAN_MAX_CONCURRENT_PER_IP` | `2` | Simultaneous generations per IP |
+| `PLAN_MAX_GENERATIONS_PER_DAY` | `50` | Per-instance generation ceiling per UTC day; resets on process restart |
+| `NODE_ENV` | – | Set to `production` on Render; only explicit `development` and `test` modes permit an unconfigured local bypass |
+| `OIDC_ISSUER_URL` | required outside development/tests | Exact OIDC issuer URL from Auth0, including its trailing slash |
+| `OIDC_AUDIENCE` | required outside development/tests | Identifier of the Auth0 API for this backend |
+| `OIDC_JWKS_URL` | required outside development/tests | Auth0 signing-key endpoint, normally the issuer plus `.well-known/jwks.json` |
+| `OIDC_ALLOWED_SUBJECT` | required outside development/tests | Exact `sub` claim of the one owner account authorized to generate plans |
 
 **Frontend (build time, `frontend/.env`)**
 
 | Variable | Purpose |
 |---|---|
 | `VITE_API_BASE_URL` | Backend base URL for production builds (no trailing slash). Empty = same-origin `/api`. It is bundled into public JavaScript, so never put secrets here. |
+| `VITE_AUTH0_DOMAIN` | Public Auth0 tenant domain, without a secret |
+| `VITE_AUTH0_CLIENT_ID` | Public Auth0 single-page application client ID |
+| `VITE_AUTH0_AUDIENCE` | Public identifier matching backend `OIDC_AUDIENCE` |
+
+Auth0 values exposed through `VITE_*` are public identifiers, not credentials. Never place the Gemini key, Auth0 client secret, or any private credential in frontend variables.
 
 ## Testing and quality checks
 
@@ -124,16 +138,17 @@ cd backend  && npm ci --omit=dev && npm start
 Requirements to check before deploying:
 
 1. **Deploy from the repository root, not `backend/` alone.** The backend and the frontend build import `../shared/`; if only a subfolder is uploaded the server fails at start-up.
-2. Set `FRONTEND_URL` on the backend to the exact origin(s) that serve the frontend, and `VITE_API_BASE_URL` at frontend build time to the backend URL (or serve both behind one domain and route `/api` to the backend).
-3. Behind a proxy/PaaS set `TRUST_PROXY=1`. Disable response buffering and allow connections of at least `GEMINI_TIMEOUT_MS` for `/api/plans/generate/stream`; the server sends a keep-alive comment every 15 s.
-4. Serve the frontend over HTTPS and consider adding a Content-Security-Policy at the static host (the API already sends restrictive headers).
-5. Rate limiting is in memory and per instance; use a shared store or the platform's limiter if you run several instances.
-6. **Do not expose the generation API to the public internet without an access-control and spend-control layer.** The generation routes have no authentication; CORS only constrains browser origins and does not prevent direct HTTP clients. Current IP-based rate and concurrency limits are abuse mitigations, not user authorization or a global Gemini spending cap.
+2. Set `FRONTEND_URL` to the exact HTTPS Vercel origin(s), `VITE_API_BASE_URL` at frontend build time to the Render API URL, and `TRUST_PROXY=1` on Render. Production backend startup requires an explicit `FRONTEND_URL` and complete OIDC configuration.
+3. Configure an Auth0 single-page application and a custom API using RS256. Add the exact Vercel URL(s) to Allowed Callback URLs, Allowed Logout URLs, and Allowed Web Origins. Also add local development origins when needed. Use the same API audience in `VITE_AUTH0_AUDIENCE` and `OIDC_AUDIENCE`, and set `OIDC_ALLOWED_SUBJECT` to the owner user's exact subject from a verified token. Do not configure or use a client secret in the browser.
+4. On Vercel, set `VITE_AUTH0_DOMAIN`, `VITE_AUTH0_CLIENT_ID`, `VITE_AUTH0_AUDIENCE`, and `VITE_API_BASE_URL` before building. On Render, set `NODE_ENV=production`, `PORT` through the platform, `FRONTEND_URL`, `TRUST_PROXY=1`, all four `OIDC_*` variables, and `GEMINI_API_KEY`; optionally configure `GEMINI_MODEL`, `GEMINI_THINKING_LEVEL`, `GEMINI_TIMEOUT_MS`, and the `PLAN_*` limits.
+5. Disable response buffering and allow connections of at least `GEMINI_TIMEOUT_MS` for `/api/plans/generate/stream`; the server sends a keep-alive comment every 15 s.
+6. The per-IP rate/concurrency limits and daily generation limit are in-memory and per instance. They reset on restart and do not coordinate across multiple instances. A shared limiter or platform controls are needed for consistent multi-instance enforcement.
+7. These application limits can reduce abuse, but are **not a hard spending cap enforced by Google**. Configure provider-side budget alerts/quotas separately and monitor usage.
 
 ## Known limitations
 
 - Data lives in one browser's `localStorage` (no sync, no accounts); clearing site data deletes events.
-- There is no user authentication or server-side tenant isolation. Anyone who can reach the API can request generation subject to per-IP limits; protect it with an identity-aware gateway or add application authentication and global usage controls before public deployment.
+- Auth0 protects generation for the single configured owner account; it does not create user accounts or server-side event storage. Event data remains in each browser's localStorage, and backend limits are process-local rather than a guaranteed global spend control.
 - Costs and vendors are planning estimates, not verified quotes. Actual paid expenses are not tracked separately.
 - Generation can take minutes; generation time depends on the provider and has not been benchmarked in the standard test suite. Tune with `GEMINI_THINKING_LEVEL` and compare the `plan_generation_timing` log line (time to first token, token usage).
 - To compare Gemini Standard with Priority latency using the same synthetic Planora event and the normal validation path, run `cd backend` then `npm run benchmark:latency -- 5 --confirm-live`. This makes 10 live requests (5 per tier); the script requires the explicit `--confirm-live` flag and writes only timing, token, outcome, and sanitized provider-error metadata. Priority is a paid tier with a documented 75–100% premium over Standard rates ([Priority inference](https://ai.google.dev/gemini-api/docs/priority-inference), [pricing](https://ai.google.dev/gemini-api/docs/pricing)); check current model pricing and account eligibility before running. It is not enabled for ordinary generation.
