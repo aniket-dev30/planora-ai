@@ -590,12 +590,29 @@ export const OUTPUT_LIST_LIMITS = {
 };
 
 const normalizeGeminiSchema = (schema) => {
-  if (Array.isArray(schema)) return schema.map(normalizeGeminiSchema);
-  if (!schema || typeof schema !== 'object') return schema;
+  if (Array.isArray(schema)) {
+    return schema.map(normalizeGeminiSchema);
+  }
+
+  if (!schema || typeof schema !== 'object') {
+    return schema;
+  }
+
   return Object.fromEntries(
     Object.entries(schema)
-      .filter(([key]) => key !== 'additionalProperties')
-      .map(([key, value]) => [key, normalizeGeminiSchema(value)]),
+      .filter(([key]) => (
+        key !== 'additionalProperties'
+        && key !== 'default'
+        && key !== 'exclusiveMinimum'
+      ))
+      .filter(([key, value]) => !(
+        key === 'maximum'
+        && value === Number.MAX_SAFE_INTEGER
+      ))
+      .map(([key, value]) => [
+        key,
+        normalizeGeminiSchema(value),
+      ]),
   );
 };
 
