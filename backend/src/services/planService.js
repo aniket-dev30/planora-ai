@@ -30,7 +30,7 @@ export const getThinkingLevel = () => {
   return level && THINKING_LEVELS.has(level) ? level : DEFAULT_THINKING_LEVEL;
 };
 
-export const DEFAULT_TIMEOUT_MS = 45_000;
+export const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_PROVIDER_ATTEMPTS = 3;
 const PROVIDER_RETRY_BASE_DELAY_MS = 200;
 const PROVIDER_RETRY_MAX_DELAY_MS = 600;
